@@ -14,7 +14,7 @@
 # Steps to enable it are explained on other web sites.
 # Steps essentially are essentially there:
 #   1) configure Tibber Pulse normally via App, pair with Tibber
-#   2) note down the typ. 6-letter password (XXX-XXX) found printed
+#   2) note down the typ. 8-letter password (XXXX-XXXX) found printed
 #      on the Tibber Bridge device near its QR code label
 #   3) power cycle the Pulse, wait till green light, power cycle again,
 #      wait till blue light and then search for wireless network "Tibber Bridge"
