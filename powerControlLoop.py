@@ -36,11 +36,10 @@ inverter_night_max_power_W = 180  # Night time reduced max power assist cap
 inverter_min_power_W = 10         # Minimum inverter output power to always maintain while DC voltage input level is good
 inverter_power_granularity_W = 5  # Minimum change of +- x Watt to apply, smaller changes are ignored and not sent to the inverter
 
-settling_time_s = 20              # Interval to wait after previous commanded change of inverter output power level
+settling_time_s = 10              # Approx. delay till DTU & Hoymiles have applied a requested power level change; esp8226 ~20sec, esp32 ~10sec
 
 lfp_undervoltage = 51.4           # DC safety limit, reduce inverter output power to minimum when DC input voltage drops to this level
 lfp_recovery_voltage = 53.2       # DC recovery limit, restart operating after undervoltage has cleared e.g. battery charged sufficiently
-
 
 
 
@@ -78,8 +77,8 @@ dtu = AhoyDtuREST(ahoydtu_host, inverter=ahoydtu_inverterId)
 meter = LocalTibberQuery(tibber_bridge_host, tibber_bridge_password)
 
 T = datetime.datetime.utcnow()
-prev_dtu_T, prev_meter_T, prev_adjust_T = T, T, T
-prev_dtu_P, prev_meter_P = 0, 0
+dtu_T, meter_T, prev_adjust_T = T, T, T
+dtu_P, meter_P = 0, 0
 
 hitUndervoltage = False
 dynamic_max_power_W = inverter_day_max_power_W
@@ -99,13 +98,13 @@ while True:
 	invpwr = dtu.getInverterReadings()
 	gridsml = meter.getMeterSMLFrame()
 
-	print(T)
+	print('Local time       : ', Tloc)
 
-	if 'U_DC' in invpwr and 'P_AC' in invpwr:
+	if 'U_DC' in invpwr and 'P_AC' in invpwr and float(invpwr['U_DC']) > 0:
 		print('DC input voltage : %6.2f V_dc' % (invpwr['U_DC']))
 		print('AC output power  : %6.2f W_rms of max %d W' % (invpwr['P_AC'], dynamic_max_power_W))
-		prev_dtu_T = T
-		prev_dtu_P = invpwr['P_AC']
+		dtu_T = T
+		dtu_P = invpwr['P_AC']
 
 		if invpwr['U_DC'] <= lfp_undervoltage:
 			hitUndervoltage = True
@@ -115,14 +114,14 @@ while True:
 	if gridsml and len(gridsml) > 0:
 		pwr = meter.extractPowerReading(gridsml)
 		print("Grid power       : %+d Watt" % (pwr))
-		prev_meter_T = T
-		prev_meter_P = pwr
+		meter_T = T
+		meter_P = pwr
 
 		mqtt_submit(mqtt_logger_host, mqtt_tibber_P_topic, pwr)
 
-	if abs((prev_dtu_T - prev_meter_T).total_seconds()) < 2:
-
-		new_P = prev_dtu_P + prev_meter_P
+	# When DTU and Grid values are "fresh enough", inspect them.
+	if abs((dtu_T - meter_T).total_seconds()) < 5:
+		new_P = dtu_P + meter_P
 		new_P = (new_P // inverter_power_granularity_W) * inverter_power_granularity_W
 		new_P = new_P + inverter_power_granularity_W  # always feed some extra
 		new_P = min(new_P, dynamic_max_power_W)
@@ -132,12 +131,15 @@ while True:
 			new_P = inverter_power_granularity_W
 			print("DC Undervoltage  : fixing output to %d Watt until recovery" % (new_P))
 
-		if (T - prev_adjust_T).total_seconds() > settling_time_s and abs(new_P - prev_dtu_P) > 2*inverter_power_granularity_W:
-			print("Command power    : %d Watt" % (new_P))
-			command_new_power(ahoydtu_host, ahoydtu_inverterId, new_P)
-			prev_adjust_T = T
-		else:
-			print("Future cmd power : %d Watt" % (new_P))
+		pdiff = new_P - dtu_P
 
-	time.sleep(8)
+		if abs(pdiff) > 2*inverter_power_granularity_W:
+			# Large load change: slowly assist, or quickly back off
+			if (T - prev_adjust_T).total_seconds() > settling_time_s or pdiff < 0:
+				print("Command power    : %d Watt" % (new_P))
+				command_new_power(ahoydtu_host, ahoydtu_inverterId, new_P)
+				prev_adjust_T = T
+			else:
+				print("Future cmd power : %d Watt" % (new_P))
 
+	time.sleep(2)
