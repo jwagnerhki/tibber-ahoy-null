@@ -13,6 +13,13 @@
 #     near zero of DC voltage is too low (e.g. battery below some %charge level),
 #     re-enables power control once DC returns to a good level (e.g. battery recharged)
 #
+#     For reference, voltage vs state of charge for 16-in-series LiFePo4 battery:
+#     51.2V = 20% charged   52.0V = 40%   52.3V = 60%   53.1V = 80%
+#
+#     NB: A better method might be to query the battery management system (BMS),
+#     they tend to keep track of battery SOC% based on energy (dis-)charge
+#     over time - perhaps more accurate.
+#
 
 import time, datetime
 import subprocess
@@ -40,8 +47,6 @@ settling_time_s = 10              # Approx. delay till DTU & Hoymiles have appli
 
 lfp_undervoltage = 51.4           # DC safety limit, reduce inverter output power to minimum when DC input voltage drops to this level
 lfp_recovery_voltage = 53.2       # DC recovery limit, restart operating after undervoltage has cleared e.g. battery charged sufficiently
-
-
 
 
 def mqtt_submit(host, topic, P_Watt):
@@ -105,6 +110,8 @@ while True:
 		print('AC output power  : %6.2f W_rms of max %d W' % (invpwr['P_AC'], dynamic_max_power_W))
 		dtu_T = T
 		dtu_P = invpwr['P_AC']
+
+	if 'U_DC' in invpwr and float(invpwr['U_DC']) > 0:
 
 		if invpwr['U_DC'] <= lfp_undervoltage:
 			hitUndervoltage = True
