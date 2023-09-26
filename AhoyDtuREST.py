@@ -12,6 +12,10 @@
 #      P_AC   - output power to grid in Watt
 #    Alas the values do not have any timestamp...
 #
+# Note: AhoyDTU firmware versions only up to 0.7.26.
+# Later versions have removed half of the REST API,
+# also cf https://github.com/lumapu/ahoy/issues/1185
+#
 
 import requests
 import threading
