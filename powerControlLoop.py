@@ -27,31 +27,38 @@ import subprocess
 from AhoyDtuREST import AhoyDtuREST
 from LocalTibberQuery import LocalTibberQuery
 
+## AhoyDTU device that is connected to the Hoymiles u-inverter
+ahoydtu_host = "192.168.0.52"
+ahoydtu_inverterId = 1            # cf. http://<ahoydtu_host>/api/inverter/list/ for list of connected inverters and their IDs
+
+## Tibber Pulse/Bridge device
 tibber_bridge_host = "192.168.0.14"
 tibber_bridge_password = "XXXX-XXXX"  # code found printed on Tibber Bridge device, below QR tag
 
+## Remote MQTT with which to share Tibber power readings
 mqtt_logger_host = "192.168.0.74"
 mqtt_tibber_P_topic = "local_tibber/power"
 mqtt_tibber_E_topic = "local_tibber/energy"
 
-ahoydtu_host = "192.168.0.52"
-ahoydtu_inverterId = 1            # cf. http://<ahoydtu_host>/api/inverter/list/ for list of connected inverters and their IDs
+## Power control settings
 
-inverter_day_max_power_W = 330    # Hoymiles HM-350, but also, consider max battery kWh (TODO: battery voltage limit to shut down inverter early!)
-                                  # Tested: can set 355W, but then inverter gets quite warm (40C)
-inverter_night_max_power_W = 180  # Night time reduced max power assist cap
-inverter_min_power_W = 10         # Minimum inverter output power to always maintain while DC voltage input level is good
+# Power limits
+inverter_day_max_power_W = 330    # Day time max power assist; Hoymiles HM-350, tested 350W, but inverter gets quite warm (>40C)
+inverter_night_max_power_W = 330  # Night time max power assist
+inverter_min_power_W = 5          # Minimum inverter output power
 inverter_power_granularity_W = 5  # Minimum change of +- x Watt to apply, smaller changes are ignored and not sent to the inverter
-
 settling_time_s = 10              # Approx. delay till DTU & Hoymiles have applied a requested power level change; esp8226 ~20sec, esp32 ~10sec
+recheck_interval_s = 10           # Interval at which to query for new values
 
-lfp_undervoltage = 51.4           # DC safety limit, reduce inverter output power to minimum when DC input voltage drops to this level
-lfp_recovery_voltage = 53.2       # DC recovery limit, restart operating after undervoltage has cleared e.g. battery charged sufficiently
+# Undervoltage shutdown/recovery
+lfp_undervoltage = 51.3           # DC safety limit, turn off the inverter altogether then the input voltage drops to this level
+lfp_recovery_voltage = 52.3       # DC recovery limit, restart inverter after undervoltage has cleared e.g. battery charged sufficiently
+				  # Note, 16S LFP voltages approx.: 51.2V = 20%, 52.0 = 40%, 52.3 = 60%, 53.1 = 80% charged
 
 
-def mqtt_submit(host, topic, P_Watt):
+def mqtt_submit(host, topic, value):
 
-	cmd = ["/usr/bin/mosquitto_pub", "-h", host, "-t", topic, "-m", str(P_Watt)]
+	cmd = ["/usr/bin/mosquitto_pub", "-h", host, "-t", topic, "-m", str(value)]
 
 	if True:
 		result = subprocess.run(cmd, shell=False, capture_output=True, text=True)
@@ -63,9 +70,8 @@ def mqtt_submit(host, topic, P_Watt):
 
 
 
-def command_new_power(host, invId, P_Watt):
+def send_JSON(host, json):
 
-	json = '{"id":%u,"cmd":"limit_nonpersistent_absolute","val":%u}' % (int(invId), int(P_Watt))
 	cmd = ["/usr/bin/curl", "-i", "-v", "-H", "Accept:application/json", "-H", "Content-Type:application/json", "-X", "POST"]
 	cmd += ["--data", json, "http://%s/api/ctrl" % (host)]
 
@@ -77,76 +83,129 @@ def command_new_power(host, invId, P_Watt):
 		print("TODO ", " ".join(cmd))
 
 
+def command_new_power(host, invId, P_Watt):
 
-dtu = AhoyDtuREST(ahoydtu_host, inverter=ahoydtu_inverterId)
-meter = LocalTibberQuery(tibber_bridge_host, tibber_bridge_password)
+	json = '{"id":%u,"cmd":"limit_nonpersistent_absolute","val":%u}' % (int(invId), int(P_Watt))
 
-T = datetime.datetime.utcnow()
-dtu_T, meter_T, prev_adjust_T = T, T, T
-dtu_P, meter_P = 0, 0
+	send_JSON(host, json)
 
-hitUndervoltage = False
-dynamic_max_power_W = inverter_day_max_power_W
 
-while True:
+def command_power_state(host, invId, powerEnabled=True):
+	'''Turn the inverter power production on or off'''
 
-	print()
+	if powerEnabled:
+		json = '{"id":%u,"cmd":"power","val":%u}' % (int(invId), 1)
+	else:
+		json = '{"id":%u,"cmd":"power","val":%u}' % (int(invId), 0)
+
+	send_JSON(host, json)
+
+
+
+if __name__ == '__main__':
+
+	dtu = AhoyDtuREST(ahoydtu_host, inverter=ahoydtu_inverterId)
+	meter = LocalTibberQuery(tibber_bridge_host, tibber_bridge_password)
 
 	T = datetime.datetime.utcnow()
-	Tloc = datetime.datetime.now()
+	dtu_T, meter_T, prev_adjust_T = T, T, T
+	dtu_P, meter_P, meter_E = 0, 0, 0
 
-	if Tloc.hour >= 8 and Tloc.hour <= 18:
-		dynamic_max_power_W = inverter_day_max_power_W
-	else:
-		dynamic_max_power_W = inverter_night_max_power_W
+	hitUndervoltage = False
+	dynamic_max_power_W = inverter_day_max_power_W
 
-	invpwr = dtu.getInverterReadings()
-	gridsml = meter.getMeterSMLFrame()
+	# Make sure the inverter is on
+	command_power_state(ahoydtu_host, ahoydtu_inverterId, powerEnabled=True)
 
-	print('Local time       : ', Tloc)
+	# Power control loop
+	while True:
 
-	if 'U_DC' in invpwr and 'P_AC' in invpwr and float(invpwr['U_DC']) > 0:
-		print('DC input voltage : %6.2f V_dc' % (invpwr['U_DC']))
-		print('AC output power  : %6.2f W_rms of max %d W' % (invpwr['P_AC'], dynamic_max_power_W))
-		dtu_T = T
-		dtu_P = invpwr['P_AC']
+		# Grab new data
+		T = datetime.datetime.utcnow()
+		Tloc = datetime.datetime.now()
 
-	if 'U_DC' in invpwr and float(invpwr['U_DC']) > 0:
+		if Tloc.hour >= 8 and Tloc.hour <= 18:
+			dynamic_max_power_W = inverter_day_max_power_W
+		else:
+			dynamic_max_power_W = inverter_night_max_power_W
 
-		if invpwr['U_DC'] <= lfp_undervoltage:
-			hitUndervoltage = True
-		elif invpwr['U_DC'] >= lfp_recovery_voltage:
-			hitUndervoltage = False
+		invdata = dtu.getInverterReadings()
+		gridsml = meter.getMeterSMLFrame()
 
-	if gridsml and len(gridsml) > 0:
-		pwr = meter.extractPowerReading(gridsml)
-		print("Grid power       : %+d Watt" % (pwr))
-		meter_T = T
-		meter_P = pwr
+		print()
+		print('Local time       : ', Tloc)
 
-		mqtt_submit(mqtt_logger_host, mqtt_tibber_P_topic, pwr)
+		if 'U_DC' in invdata and 'P_AC' in invdata and float(invdata['U_DC']) > 0:
+			print('DC input voltage : %6.2f V_dc' % (invdata['U_DC']))
+			print('AC output power  : %6.2f W_rms of max %d W' % (invdata['P_AC'], dynamic_max_power_W))
+			dtu_T = T
+			dtu_P = invdata['P_AC']
 
-	# When DTU and Grid values are "fresh enough", inspect them.
-	if abs((dtu_T - meter_T).total_seconds()) < 5:
-		new_P = dtu_P + meter_P
-		new_P = (new_P // inverter_power_granularity_W) * inverter_power_granularity_W
-		new_P = new_P + inverter_power_granularity_W  # always feed some extra
-		new_P = min(new_P, dynamic_max_power_W)
-		new_P = max(new_P, inverter_min_power_W)
+		if gridsml and len(gridsml) > 0:
+			meter_T = T
+			meter_P = meter.extractPowerReading(gridsml)
+			meter_E = meter.extractEnergyReading(gridsml)
+			print("Grid power       : %+d Watt" % (meter_P))
+			print("Grid energy      : %.2f kWh" % (meter_E/1000))
 
-		if hitUndervoltage:
-			new_P = inverter_power_granularity_W
-			print("DC Undervoltage  : fixing output to %d Watt until recovery" % (new_P))
+			# Helper: share the grid meter reading over MQTT, since no
+			# dedicated program does any querying and logging (for now)
+			if mqtt_logger_host is not None:
+				mqtt_submit(mqtt_logger_host, mqtt_tibber_P_topic, meter_P)
+				mqtt_submit(mqtt_logger_host, mqtt_tibber_E_topic, int(meter_E))
 
-		pdiff = new_P - dtu_P
 
-		if abs(pdiff) > 2*inverter_power_granularity_W:
-			# Large load change: slowly assist, or quickly back off
-			if (T - prev_adjust_T).total_seconds() > settling_time_s or pdiff < 0:
-				print("Command power    : %d Watt" % (new_P))
-				command_new_power(ahoydtu_host, ahoydtu_inverterId, new_P)
-				prev_adjust_T = T
-			else:
-				print("Future cmd power : %d Watt" % (new_P))
+		# Check undervoltage and recovery from it
+		if 'U_DC' in invdata and float(invdata['U_DC']) > 0:
+			if invdata['U_DC'] <= lfp_undervoltage:
+				hitUndervoltage = True
+			elif invdata['U_DC'] >= lfp_recovery_voltage:
+				hitUndervoltage = False
 
-	time.sleep(2)
+
+		# During undervoltage, shut down the u-inverter power production,
+		# turn back on only after undervoltage condition has cleared
+		if hitUndervoltage and 'P_AC' in invdata and float(invdata['P_AC']) > 0:
+			print("Command power    : OFF due to DC undervoltage")
+			command_power_state(ahoydtu_host, ahoydtu_inverterId, powerEnabled=False)
+			time.sleep(settling_time_s)
+			continue
+		elif (not hitUndervoltage) and 'P_AC' in invdata and float(invdata['P_AC']) <= 0:
+			print("Command power    : ON due to recovery from earlier DC undervoltage")
+			command_power_state(ahoydtu_host, ahoydtu_inverterId, powerEnabled=True)
+			time.sleep(settling_time_s)
+			continue
+
+
+		# When DTU and Grid values are "fresh enough", inspect them,
+		# and adjust inverter output power to get near zero energy export
+		if abs((dtu_T - meter_T).total_seconds()) < recheck_interval_s/2:
+			new_P = dtu_P + meter_P
+			new_P = (new_P // inverter_power_granularity_W) * inverter_power_granularity_W
+			new_P = new_P + inverter_power_granularity_W  # always feed some extra
+			new_P = min(new_P, dynamic_max_power_W)
+			new_P = max(new_P, inverter_min_power_W)
+
+			#if hitUndervoltage:
+			#	new_P = inverter_power_granularity_W
+			#	print("DC Undervoltage  : fixing output to %d Watt until recovery" % (new_P))
+
+			pdiff = new_P - dtu_P
+
+			if abs(pdiff) > 2*inverter_power_granularity_W:
+				# Large load change: slowly assist, or quickly back off
+				if hitUndervoltage:
+					print("Command power    : stay OFF due to DC undervoltage")
+				elif (T - prev_adjust_T).total_seconds() > settling_time_s or pdiff < 0:
+					print("Command power    : %d Watt" % (new_P))
+					command_new_power(ahoydtu_host, ahoydtu_inverterId, new_P)
+					prev_adjust_T = T
+				else:
+					print("Future cmd power : %d Watt" % (new_P))
+
+		# Pause until the next iteration
+		tsleep = recheck_interval_s - (datetime.datetime.utcnow() - T).seconds
+		if tsleep > 0:
+			print("Re-checking after: %d sec" % (tsleep))
+			time.sleep(tsleep)
+

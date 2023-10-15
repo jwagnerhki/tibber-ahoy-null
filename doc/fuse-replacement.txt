@@ -1,0 +1,69 @@
+
+
+== Battery-connected Hoymiles HM-350 ==
+
+
+The HM350 is fed from a 51.2V 16S LFP battery
+
+THe HM350 Vin- is connected directly to the battery V-
+
+The HM350 Vin+ is connected to battery V+ via a series
+fuse and bypass'able high power resistor as follows:
+
+ HM350_Vin-                                        LFP_V-
+   |                                                 |
+   +-------------------------------------------------+
+
+ HM350_Vin+                                        LFP_V+
+   |                                                 |
+   +-------+ solar fuse 15A +----+ 5.6 Ohm 10W +-----+
+                                 |             |
+                                 +-- bypass  --+
+                                     cable 4mm2
+
+
+== Power-up sequence and/or fuse replacement ==
+
+1) Disconnect the AC line of HM350
+
+2) Remove the bypass cable
+
+3) Replace the failed 15A fuse
+
+4) Wait for the HM350 to charge up to battery voltage
+   via the series 10W resistor
+
+5) HM350 should be blinking red, waiting for AC
+
+6) Add the bypass cable back in,
+   bypassing the resistor
+
+7) Reconnect the AC line of HM350
+
+8) Wait for HM350 to start blinking green
+
+
+Details:
+
+The HM350 has a high inrush current when initially connected
+to a DC input voltage. An LFP battery can support extremely
+high currents of >50A and this could vaporize circuit board
+traces on the HM350.
+
+To avoid the inrush current the HM350 DC input must be brought
+up to battery voltage via the 5.6 Ohm 10W series resistor first.
+
+The choice of resistance is due to maximum LFP voltage (~55V)
+and maximum HM350 input current (~10A); 55V / 10A ~= 5.6 ohm
+
+The HM350 AC output must be off/disconnected (blinking red),
+otherwise the HM350 might be start producing (blinking green)
+from battery - leading to several volts of voltage drop across
+the series resistor i.e. HM350 sees a much lower DC voltage
+than the battery voltage, the bypass cable cannot be inserted
+without burning the fuse, and the resistor heats up excessively.
+
+
+
+
+

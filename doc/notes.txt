@@ -1,0 +1,201 @@
+
+
+16S 51.2V LiFePo4
+
+  58.4V = 100%, charging
+  54.4V = 100%, resting
+  53.2V = 90%
+  52.8V = 70%
+  52.4V = 40%
+  52.0V = 30%
+  51.6V = 20%
+  51.2V = 17%
+  50.0V = 14%
+  48.0V = 9%
+  40.0V = 0% and dead
+
+  Elerix EX-L50K - 3.2 V / 50 Ah / 3C
+  16 * 3.2 * 50 = 2560 Wh
+  80% DoD * 2560 Wh = 2.048 kWh
+
+
+AhoyDTU v0.6.9 running at
+
+http://192.168.0.52/?v=0.6.9
+
+  System Infos:
+  Inverter #0: hm350 (v10014) is available and is producing
+  Inverter #1: hm350night (v10014) is available and is not producing
+  MQTT is connected, 20056 packets sent, 0 packets received
+
+http://192.168.0.52/get_setup
+
+  Downloads a copy of the AhoyDTU configuration, but with
+  all passwords blanked out.
+
+Changing power limits:
+
+  # inverter 0 hm350
+  curl -i -H "Accept: application/json" -H "Content-Type:application/json" -X POST \
+    --data '{"id": 0, "cmd": "limit_persistent_absolute", "val": 350}' http://192.168.0.52/api/ctrl
+
+  # inverter 1 hm350night, set e.g. a persistent 330 Watt limit
+  curl -i -H "Accept: application/json" -H "Content-Type:application/json" -X POST \
+    --data '{"id": 1, "cmd": "limit_persistent_absolute", "val": 330}' http://192.168.0.52/api/ctrl
+  # inverter 1 hm350night, set e.g. a non-persistent 60 Watt limit
+  curl -i -H "Accept: application/json" -H "Content-Type:application/json" -X POST \
+    --data '{"id": 1, "cmd": "nonlimit_persistent_absolute", "val": 60}' http://192.168.0.52/api/ctrl
+
+  # get stats
+  wget -O- http://ahoy.lan/api/inverter/id/1 | less -S
+
+  # inverter 1 hm350night, restart
+  curl -i -H "Accept: application/json" -H "Content-Type:application/json" -X POST \
+    --data '{"id": 1, "cmd": "restart"}' http://192.168.0.52/api/ctrl
+
+AhoyDTU REST API
+
+   http://ahoy.lan/api/inverter/list   - list of configured inverters
+   http://ahoy.lan/api/record/config   - power limits
+   http://ahoy.lan/api/record/live     - operating status in JSON 'inverter[]'
+
+   Under the live operating status fields, of interest are:
+     U_DC   - voltage from solar panel or battery as seen at input of inverter
+     P_AC   - output power to grid in Watt
+   Alas the values do not have any timestamp...
+
+
+http://192.168.0.52/api/inverter/list
+
+	{
+		"inverter": [
+			{
+				"enabled": true,
+				"id": 0,
+				"name": "hm350",
+				"serial": "112182060636",
+				"channels": 1,
+				"version": "10014",
+				"ch_yield_cor": [
+					0
+				],
+				"ch_name": [
+					"TSM"
+				],
+				"ch_max_pwr": [
+					400
+				]
+			},
+			{
+				"enabled": true,
+				"id": 1,
+				"name": "hm350night",
+				"serial": "112183220586",
+				"channels": 1,
+				"version": "10014",
+				"ch_yield_cor": [
+					0
+				],
+				"ch_name": [
+					"battery"
+				],
+				"ch_max_pwr": [
+					350
+				]
+			}
+		],
+		"interval": "15",
+		"retries": "5",
+		"max_num_inverters": 10,
+		"rstMid": false,
+		"rstNAvail": false,
+		"rstComStop": false
+	}
+
+
+http://ahoy.lan/api/record/config
+
+{ "inverter": [ [ { "fld": "active_PowerLimit", "unit": "%", "val": "100.00"
+            }
+        ], [ { "fld": "active_PowerLimit", "unit": "%", "val": "31.40"
+            }
+        ] ]
+}
+
+http://ahoy.lan/api/record/live
+
+{ "inverter": [ [ { "fld": "U_DC", "unit": "V", "val": "25.90"
+            },
+            { "fld": "I_DC", "unit": "A", "val": "0.04"
+            },
+            { "fld": "P_DC", "unit": "W", "val": "1.10"
+            },
+            { "fld": "YieldDay", "unit": "Wh", "val": "1583.00"
+            },
+            { "fld": "YieldTotal", "unit": "kWh", "val": "263.25"
+            },
+            { "fld": "Irradiation", "unit": "%", "val": "0.28"
+            },
+            { "fld": "U_AC", "unit": "V", "val": "0.00"
+            },
+            { "fld": "I_AC", "unit": "A", "val": "0.00"
+            },
+            { "fld": "P_AC", "unit": "W", "val": "0.00"
+            },
+            { "fld": "Q_AC", "unit": "var", "val": "0.00"
+            },
+            { "fld": "F_AC", "unit": "Hz", "val": "0.00"
+            },
+            { "fld": "PF_AC", "unit": "", "val": "0.00"
+            },
+            { "fld": "Temp", "unit": "°C", "val": "20.60"
+            },
+            { "fld": "ALARM_MES_ID", "unit": "", "val": "5.00"
+            },
+            { "fld": "YieldDay", "unit": "Wh", "val": "1583.00"
+            },
+            { "fld": "YieldTotal", "unit": "kWh", "val": "263.25"
+            },
+            { "fld": "P_DC", "unit": "W", "val": "1.10"
+            },
+            { "fld": "Efficiency", "unit": "%", "val": "0.00"
+            }
+        ], [ { "fld": "U_DC", "unit": "V", "val": "53.10"
+            },
+            { "fld": "I_DC", "unit": "A", "val": "2.21"
+            },
+            { "fld": "P_DC", "unit": "W", "val": "117.40"
+            },
+            { "fld": "YieldDay", "unit": "Wh", "val": "3418.00"
+            },
+            { "fld": "YieldTotal", "unit": "kWh", "val": "26.11"
+            },
+            { "fld": "Irradiation", "unit": "%", "val": "33.54"
+            },
+            { "fld": "U_AC", "unit": "V", "val": "233.90"
+            },
+            { "fld": "I_AC", "unit": "A", "val": "0.48"
+            },
+            { "fld": "P_AC", "unit": "W", "val": "112.10"
+            },
+            { "fld": "Q_AC", "unit": "var", "val": "0.00"
+            },
+            { "fld": "F_AC", "unit": "Hz", "val": "50.00"
+            },
+            { "fld": "PF_AC", "unit": "", "val": "1.00"
+            },
+            { "fld": "Temp", "unit": "°C", "val": "30.80"
+            },
+            { "fld": "ALARM_MES_ID", "unit": "", "val": "306.00"
+            },
+            { "fld": "YieldDay", "unit": "Wh", "val": "3418.00"
+            },
+            { "fld": "YieldTotal", "unit": "kWh", "val": "26.11"
+            },
+            { "fld": "P_DC", "unit": "W", "val": "117.40"
+            },
+            { "fld": "Efficiency", "unit": "%", "val": "95.49"
+            }
+        ] ]
+}
+
