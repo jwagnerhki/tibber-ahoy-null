@@ -67,18 +67,26 @@ class AhoyDtuRESTAsync(threading.Thread):
 
 	async def _getJSON(self, url):
 
-		async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5)) as client:
-			async with client.get(url) as resp:
-				if resp.status != 200:
-					print ('HTTP Error %d while querying %s' % (resp.status, url))
-					return None
-				j = await resp.json()
+		try:
+			nokeepalive = aiohttp.TCPConnector(force_close=True)
+			async with aiohttp.ClientSession(connector=nokeepalive, timeout=aiohttp.ClientTimeout(total=2)) as client:
+				async with client.get(url) as resp:
+					if resp.status != 200:
+						print ('HTTP Error %d while querying %s' % (resp.status, url))
+						return None
+					j = await resp.json()
 
-				if not j:
-					print("Unexpected reply on %s: %s - %s" % (url, str(r), str(j)))
-					return None
+					if not j:
+						print("Unexpected reply on %s: %s - %s" % (url, str(r), str(j)))
+						return None
 
-				return j
+					return j
+		except aiohttp.ServerDisconnectedError:
+			print('Unexpected _getJSON(%s) outcome - server disconnected' % (url))
+			return None
+		except Exception as e:
+			print('Unexpected _getJSON(%s) outcome - exception: %s' % (url, str(e)))
+			return None
 
 		print('Unexpected _getJSON(%s) outcome, maybe could not connect' % (url))
 

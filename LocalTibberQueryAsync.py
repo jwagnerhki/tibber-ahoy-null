@@ -51,13 +51,21 @@ class LocalTibberQueryAsync:
 	async def getMeterSMLFrame(self):
 		url = 'http://%s/data.json?node_id=1' % (self.hostname)
 
-		async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5)) as client:
-			async with client.get(url, auth=self.auth) as resp:
-				if resp.status != 200:
-					print ('HTTP Error %d while querying %s' % (resp.status, url))
-					return None
-				self.smlframe = await resp.read()
-				return self.smlframe
+		try:
+			nokeepalive = aiohttp.TCPConnector(force_close=True)
+			async with aiohttp.ClientSession(connector=nokeepalive, timeout=aiohttp.ClientTimeout(total=5)) as client:
+				async with client.get(url, auth=self.auth) as resp:
+					if resp.status != 200:
+						print ('HTTP Error %d while querying %s' % (resp.status, url))
+						return None
+					self.smlframe = await resp.read()
+					return self.smlframe
+		except aiohttp.ServerDisconnectedError:
+			print('Unexpected getMeterSMLFrame(%s) outcome - server disconnected' % (url))
+			return None
+		except Exception as e:
+			print('Unexpected getMeterSMLFrame(%s) outcome - exception: %s' % (url, str(e)))
+			return None
 
 		print ('LocalTibberQueryAsync: Unexpected HTTP connect error')
 
