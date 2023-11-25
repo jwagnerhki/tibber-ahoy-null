@@ -1,0 +1,23 @@
+#! /bin/sh
+#
+# Very simple script to auto-start the control loop,
+# behind Screen, upon system power-up
+#
+# File: /etc/init.d/hoymiles
+# Config:
+# $ cd /etc/rc5.d/
+# $ ln -s ../init.d/hoymiles S01hoymiles
+#
+
+case $1 in
+     start)
+       su -c "screen -dmS hoymiles /home/atom/src/hoymiles-battery/powerControlLoopAsync.py" -l atom
+       ;;
+     status)
+        ps axuf | grep powerControlLoopAsync
+        ;;
+     stop)
+        killall screen
+        ;;
+esac
+exit 0
