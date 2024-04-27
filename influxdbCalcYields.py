@@ -5,6 +5,7 @@ import time
 import datetime
 import calendar
 
+ql_timezone = "tz('Europe/Berlin')"
 dbhost = "localhost"
 dbport = 8086
 
@@ -15,7 +16,7 @@ def getYieldOfDay(db, year=2023, month=1, day=1):
 
 	template_AC_W = "SELECT mean(value) FROM autogen.solar WHERE (topic::tag = 'solar/data/Steca_Load_W') "
 	template_AC_W += "AND time >= '%s' and time < '%s' + 1d "
-	template_AC_W += "GROUP BY time(%ds) fill(null)"
+	template_AC_W += "GROUP BY time(%ds) fill(null) " + ql_timezone
 
 	datestr = '%d-%02d-%02d' % (year, month, day)
 	q_AC_W = template_AC_W % (datestr, datestr, t_grouping_sec)
