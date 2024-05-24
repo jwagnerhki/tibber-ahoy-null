@@ -34,13 +34,25 @@ class LocalInfluxdbQueryAsync:
 		return await self.queryFloat(qry)
 
 
+	async def getBatteryPower(self):
+		qry = "SELECT last(value) FROM autogen.solar WHERE (topic::tag = 'solar/data/Battery_Power') and time >= now() - 5m fill(null)"
+		return await self.queryFloat(qry)
+
+
+	async def getStecaLoad(self):
+		qry = "SELECT last(value) FROM autogen.solar WHERE (topic::tag = 'solar/data/Steca_Load_W') and time >= now() - 5m fill(null)"
+		return await self.queryFloat(qry)
+
+
 if __name__ == '__main__':
 
 	async def main():
-		db = LocalInfluxdbQuery()
-		out = await asyncio.gather(*[db.getBatteryVoltage(), db.getBatteryPercentage()])
+		db = LocalInfluxdbQueryAsync()
+		out = await asyncio.gather(*[db.getBatteryVoltage(), db.getBatteryPower(), db.getBatteryPercentage(), db.getStecaLoad()])
 		print('Battery Voltage: %.2f V' % (out[0]))
-		print('Battery Charged: %.1f %%' % (out[1]))
+		print('Battery Power:   %+.2f W, %s' % (out[1], 'charging' if out[1]>0 else 'discharging'))
+		print('Battery Charged: %.1f %%' % (out[2]))
+		print('Steca AC load:   %.1f VA' % (out[3]))
 
 	asyncio.run(main())
 
