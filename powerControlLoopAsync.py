@@ -45,10 +45,8 @@ bms_db_host = "localhost"
 bms_db_port = 8086
 bms_db_database = "controllers"
 
-## Remote MQTT with which to share Tibber power readings
-mqtt_logger_host = "192.168.0.74"
-mqtt_tibber_P_topic = "local_tibber/power"
-mqtt_tibber_E_topic = "local_tibber/energy"
+## Remote MQTT over which to auto-off the 5000VA Steca AC inverter
+mqtt_host = "192.168.0.74"
 
 ## Steca Solarix PLI-4800 AC input, controlled by a MyStrom wifi switch with a REST API
 ## with simple http get "http://[switch_ip]/relay?state=1" for AC ON, or state=0 for AC OFF
@@ -60,15 +58,15 @@ inverter_day_max_power_W = 310    # Day time max power assist; Hoymiles HM-350, 
 inverter_night_max_power_W = 310  # Night time max power assist
 inverter_min_power_W = 5          # Minimum inverter output power
 inverter_power_granularity_W = 5  # Minimum change of +- x Watt to apply, smaller changes are ignored and not sent to the inverter
-settling_time_s = 10              # Approx. delay till DTU & Hoymiles have applied a requested power level change; esp8226 ~20sec, esp32 ~10sec
+settling_time_s = 5               # Approx. delay till DTU & Hoymiles have applied a requested power level change; esp8226 ~20sec, esp32 ~10sec
 recheck_interval_s = 10           # Interval at which to query for new values
 
 # Undervoltage shutdown/recovery
-lfp_undervoltage = 51.3           # DC safety limit, turn off the inverter altogether then the input voltage drops to this level
-lfp_recovery_voltage = 52.3       # DC recovery limit, restart inverter once undervoltage has cleared e.g. battery charged sufficiently
+lfp_undervoltage = 51.2           # DC safety limit, turn off the inverter altogether then the input voltage drops to this level
+lfp_recovery_voltage = 51.5       # DC recovery limit, restart inverter once undervoltage has cleared e.g. battery charged sufficiently
 				  # Note, 16S LFP voltages approx.: 51.2V = 20%, 52.0 = 40%, 52.3 = 60%, 53.1 = 80% charged
 lfp_min_SOC_percent = 20.0        # SOC safety limit, turn off inverter when remaining charge of battery drops to this level
-lfp_recovery_SOC_percent = 30.0   # SOC recovery limit, restart after charged sufficiently _and_ lfp_recovery_voltage is met
+#lfp_recovery_SOC_percent = 30.0   # SOC recovery limit, restart after charged sufficiently _and_ lfp_recovery_voltage is met
 
 
 def mqtt_submit(host, topic, value):
@@ -116,6 +114,14 @@ def command_power_state(host, invId, powerEnabled=True):
 	send_JSON(host, json)
 
 
+def command_steca_inverter_state(host, enable=False):
+
+	if not enable:
+		mqtt_submit(host, "solar/control/inverter_enable", "false")
+	else:
+		mqtt_submit(host, "solar/control/inverter_enable", "true")
+
+
 async def query_steca_mystrom_on(host):
 
 	ac_input_on = False
@@ -138,6 +144,39 @@ async def query_steca_mystrom_on(host):
 
 
 
+def isBatteryLow(SoC_pct, voltage_V, battery_W):
+	"""
+	Check combination of battery voltage, BMS-reported SoC%, and power draw,
+	to return a best guess whether the 16S LFP battery is close to empty (80% DoD).
+	The SoC chaged% reading is not always reliable.
+	"""
+	drained = False
+
+	# BMS-reported load: P<0 means discharging, P>0 means charging.
+	# Flip the sign
+	if battery_W >= 0:
+		load_W = 0
+	else:
+		load_W = -battery_W
+
+	# Medium to no load, and voltage indicates below 20% SoC
+	if voltage_V <= 51.2 and load_W <= 400.0:
+		drained = True
+
+	# Voltage looks critical regardless of load
+	if voltage_V <= 49.5:
+		drained = True
+
+	# Load is high and hence internal voltage drop is high,
+	# fall back to trusting SoC% rather than voltage?
+	if (load_W > 400.0 and SoC_pct < 20.0) and voltage_V <= 50.0:
+		drained = True
+
+	print ("DBG: isBatteryLow(%.2f%%, %.2fV, load=%.2fW) verdict: %s" % (SoC_pct, voltage_V, load_W, drained))
+
+	return drained
+
+
 async def controlLoop():
 
 	dtu = AhoyDtuRESTAsync(ahoydtu_host, inverter=ahoydtu_inverterId)
@@ -146,7 +185,7 @@ async def controlLoop():
 
 	T = datetime.datetime.utcnow()
 	dtu_T, meter_T, prev_adjust_T = T, T, T
-	dtu_P, meter_P, meter_E = 0, 0, 0
+	dtu_Pac, meter_P, meter_E = 0, 0, 0
 
 	hitUndervoltage = False
 	dynamic_max_power_W = inverter_day_max_power_W
@@ -168,9 +207,9 @@ async def controlLoop():
 			dynamic_max_power_W = inverter_night_max_power_W
 
 		#timing0 = time.perf_counter()
-		[invdata,gridsml,bmsVolt,bmsSOC,stecaCharge] = await asyncio.gather(*[dtu.getInverterReadings(),
+		[invdata,gridsml,bmsVolt,bmsPower,bmsSOC,stecaCharge] = await asyncio.gather(*[dtu.readInverterData(),
 			meter.getMeterSMLFrame(),
-			bms.getBatteryVoltage(), bms.getBatteryPercentage(),
+			bms.getBatteryVoltage(), bms.getBatteryPower(), bms.getBatteryPercentage(),
 			query_steca_mystrom_on(steca_ac_host)
 		])
 		#dtiming = time.perf_counter() - timing0
@@ -181,14 +220,17 @@ async def controlLoop():
 
 		print('Steca AC In      : %s' % ('ON' if stecaCharge else 'off'))
 
-		if 'U_DC' in invdata and 'P_AC' in invdata and float(invdata['U_DC']) > 0:
-			print('DC input voltage : %.2f V_dc' % (invdata['U_DC']))
-			print('AC output power  : %.2f W_rms of max %d W' % (invdata['P_AC'], dynamic_max_power_W))
-			dtu_T = T
-			dtu_P = invdata['P_AC']
-			dtu_V = float(invdata['U_DC'])
+		tmp1 = dtu.getChannelMeasurement(invdata, 'U_DC', dtu.DC_INPUT_1)
+		tmp2 = dtu.getChannelMeasurement(invdata, 'P_AC', dtu.AC_CHAN)
+		if tmp1 != None and tmp2 != None:
+			dtu_T = dtu.last_update
+			dtu_Vdc = float(tmp1)
+			dtu_Pac = float(tmp2)
+			print('DTU report time  : %s' % (str(dtu_T)))
+			print('Hoymiles DC in   : %.2f V_dc' % (dtu_Vdc))
+			print('Hoymiles AC pwr  : %.2f W_rms of max %d W' % (dtu_Pac, dynamic_max_power_W))
 		else:
-			dtu_V, dtu_P = 0.0, 0.0
+			dtu_Vdc, dtu_Pac = 0.0, 0.0
 
 		if bmsVolt > 0:
 			print('Battery voltage  : %.2f V per BMS' % (bmsVolt))
@@ -203,12 +245,6 @@ async def controlLoop():
 			print("Grid power       : %+d Watt" % (meter_P))
 			print("Grid energy      : %.2f kWh" % (meter_E/1000))
 
-			# Helper: share the grid meter reading over MQTT, since no
-			# dedicated program does any querying and logging (for now)
-			if mqtt_logger_host is not None:
-				mqtt_submit(mqtt_logger_host, mqtt_tibber_P_topic, meter_P)
-				mqtt_submit(mqtt_logger_host, mqtt_tibber_E_topic, int(meter_E))
-
 
 		# Stop microinverter if Steca Solarix hybrid inverter AC-IN was
 		# switched on (outside of this script) to charge battery esp.
@@ -221,21 +257,34 @@ async def controlLoop():
 			continue
 
 		# Check battery undervoltage & low charge remaining, and recovery from it
-		if 'U_DC' in invdata and dtu_V > 0:
-			#if dtu_V <= lfp_undervoltage:
-			if dtu_V <= lfp_undervoltage or bmsSOC <= lfp_min_SOC_percent:
-				hitUndervoltage = True
-			elif dtu_V >= lfp_recovery_voltage and bmsSOC >= lfp_recovery_SOC_percent and not stecaCharge:
+		# First judge based on Hoymiles -reported DC input voltage
+		if dtu_Vdc > 0:
+			drained = isBatteryLow(bmsSOC, dtu_Vdc, bmsPower)
+			if hitUndervoltage and not drained and dtu_Vdc >= lfp_recovery_voltage:
 				hitUndervoltage = False
+			elif drained:
+				hitUndervoltage = True
+
+		# Secondly judge from BMS -reported battery voltage
+		drained = isBatteryLow(bmsSOC, bmsVolt, bmsPower)
+		if hitUndervoltage and not drained and bmsVolt >= lfp_recovery_voltage:
+			hitUndervoltage = False
+		elif drained:
+			hitUndervoltage = True
+
+		# Aux: safe-off a separate Steca Solarix PLI hybrid inverter
+		if drained:
+			print("Command Steca AC : safety OFF due low battery SOC %%")
+			command_steca_inverter_state(mqtt_host, enable=False)
 
 		# During undervoltage, shut down the u-inverter power production,
 		# turn back on only after undervoltage condition has cleared
-		if hitUndervoltage and 'P_AC' in invdata and float(invdata['P_AC']) > 0:
+		if hitUndervoltage and dtu_Pac > 0:
 			print("Command power    : OFF due low battery, wait till %.2f V and %.0f %% charge" % (lfp_recovery_voltage,lfp_min_SOC_percent))
 			command_power_state(ahoydtu_host, ahoydtu_inverterId, powerEnabled=False)
 			time.sleep(settling_time_s)
 			continue
-		elif (not hitUndervoltage) and 'P_AC' in invdata and float(invdata['P_AC']) <= 0 and not stecaCharge:
+		elif (not hitUndervoltage) and dtu_Pac <= 0 and not stecaCharge:
 			print("Command power    : ON due to recovery from earlier DC undervoltage or AC-Charge Priority")
 			command_power_state(ahoydtu_host, ahoydtu_inverterId, powerEnabled=True)
 			time.sleep(settling_time_s)
@@ -245,7 +294,7 @@ async def controlLoop():
 		# When DTU and Grid values are "fresh enough", inspect them,
 		# and adjust inverter output power to get near zero energy export
 		if abs((dtu_T - meter_T).total_seconds()) < recheck_interval_s/2:
-			new_P = dtu_P + meter_P
+			new_P = dtu_Pac + meter_P
 			new_P = (new_P // inverter_power_granularity_W) * inverter_power_granularity_W
 			new_P = new_P + inverter_power_granularity_W  # always feed some extra
 			new_P = min(new_P, dynamic_max_power_W)
@@ -255,7 +304,7 @@ async def controlLoop():
 			#	new_P = inverter_power_granularity_W
 			#	print("DC Undervoltage  : fixing output to %d Watt until recovery" % (new_P))
 
-			pdiff = new_P - dtu_P
+			pdiff = new_P - dtu_Pac
 
 			if abs(pdiff) > 2*inverter_power_granularity_W:
 				# Large load change: slowly assist, or quickly back off
