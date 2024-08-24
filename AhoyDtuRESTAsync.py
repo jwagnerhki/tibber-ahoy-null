@@ -3,19 +3,21 @@
 # AhoyDTU REST API
 #
 #    http://<hostname of your AhoyDTU>/api/
-#    http://ahoy.lan/api/inverter/list   - list of configured inverters
-#    http://ahoy.lan/api/record/config   - power limits
-#    http://ahoy.lan/api/record/live     - operating status in JSON 'inverter[]'
+#    http://<ahoydtu>/api/inverter/list    - list of configured inverters and their Serial#
+#    http://<ahoydtu>/api/index            - reachability and 'cur_pwr' of the above inverters
+#    http://<ahoydtu>/api/live             - measurement point names and units of ch0 (AC) and ch1..n (PV)
+#    http://<ahoydtu>/api/inverter/id/<nr> - measurement point values (AC and PV(s)), active power limit 'power_limit_read'
 #
-#    Under the live operating status fields, of interest are:
-#      U_DC   - voltage from solar panel or battery as seen at input of inverter
-#      P_AC   - output power to grid in Watt
-#    Alas the values do not have any timestamp...
+# Note: AhoyDTU firmware versions up to 0.7.26 had http://<ahoydtu>/api/record/live
+# which had measurement point names, values, units. This was deprecated in later
+# versions of the Ahoy REST API, see https://github.com/lumapu/ahoy/issues/1185
 #
-# Note: AhoyDTU firmware versions only up to 0.7.26.
-# Later versions have removed half of the REST API,
-# also cf https://github.com/lumapu/ahoy/issues/1185
+# Now measurement names and units are read once at creation of AhoyDtuREST().
+# Live values are read from /api/inverter/id/<nr> and parsed.
+# There is a field 'ts_last_success' which contains the Unix timestamp. Todo: use it?
 #
+
+import requests
 
 import asyncio
 import aiohttp
@@ -34,38 +36,74 @@ class AhoyDtuRESTAsync(threading.Thread):
 		self.runnable = self.queryLoop
 		self.daemon = True
 
+		self.max_chan = 1 + 8  # todo: from http://<ahoydtu>/api/inverter/list JSON get max(inverter[]['channels']) + 1
+		self.AC_CHAN = 0
+
 		self.readings = {}
 		self.last_update = datetime.datetime.utcnow()
+
+		url = 'http://%s/api/live' % (self.hostname)
+		j = self._getJSON(url)
+
+		self.field_names = [[]] * self.max_chan
+		self.field_units = [[]] * self.max_chan
+		self.field_names[0] = j['ch0_fld_names']
+		self.field_units[0] = j['ch0_fld_units']
+		for n in range(1, self.max_chan):
+			self.field_names[n] = j['fld_names']
+			self.field_units[n] = j['fld_units']
+
 
 	def run(self):
 
 		self.runnable()
 
 
-	def queryLoop(self):
+	async def queryLoop(self):
 		"""
 		Inverter status polling loop - for debug purposes.
-		TODO: modify so fill data into a Queue object shared with potential consumer
 		"""
-
 		while True:
-			ir = self.getInverterReadings()
-			if 'U_DC' in ir and 'P_AC' in ir:
-				self.readings = ir
-				self.last_update = datetime.datetime.utcnow()
-				print()
-				print(self.last_update)
-				print('Input voltage: %6.2f V' % (ir['U_DC']))
-				print('Output power : %6.2f W' % (ir['P_AC']))
-
-			il = self.getActiveLimits()
-			if 'active_PowerLimit' in il:
-				print('Power limit  : %.2f%%' % (il['active_PowerLimit']))
-
-			time.sleep(5)
+			invdata = await self.readInverterData()
+			plimit = self.getActiveLimit(invdata)
+			print('== Inverter %d - power limit %d Watt ==' % (self.inverter, plimit))
+			print('Updated     %s' % (str(self.last_update)))
+			print('YieldTotal  %s' % (self.getChannelMeasurement(invdata, 'YieldTotal', self.AC_CHAN)))
+			print('YieldDay    %s' % (self.getChannelMeasurement(invdata, 'YieldDay', self.AC_CHAN)))
+			for ch in range(len(invdata['ch'])):
+				self.getChannelMeasurements(invdata, ch, True)
+			await asyncio.sleep(5)
 
 
-	async def _getJSON(self, url):
+	def _getJSON(self, url):
+
+		try:
+			r = requests.get(url, timeout=5)
+		except requests.ConnectionError as e:
+			print(e)
+			return None
+		except requests.exceptions.ReadTimeout as e:
+			print(e)
+			return None
+
+		if (r.status_code != 200):
+			print ('HTTP Error %d while querying %s' % (r.status_code, url))
+			return None
+
+		try:
+			j = r.json()
+		except json.decoder.JSONDecodeError as e:
+			print ('JSON response decode error: %s' % (str(e)))
+			return None
+
+		if not j:
+			print("Unexpected reply on %s: %s - %s" % (url, str(r), str(j)))
+			return None
+
+		return j
+
+
+	async def _getJSON_async(self, url):
 
 		try:
 			nokeepalive = aiohttp.TCPConnector(force_close=True)
@@ -93,56 +131,60 @@ class AhoyDtuRESTAsync(threading.Thread):
 		return None
 
 
-	async def _getInverterJSON(self, url):
+	async def readInverterData(self):
 
-		j = await self._getJSON(url)
+		url = 'http://%s/api/inverter/id/%d' % (self.hostname, self.inverter)
+		j = await self._getJSON_async(url)
 		if not j:
 			return None
 
-		if 'inverter' not in j:
-			print("Unexpected reply on %s without 'inverter' field: %s" % (url, str(j)))
+		self.last_update = self.getDataTimestamp(j)
+
+		return j
+
+
+	def getDataTimestamp(self, invdata):
+
+		unixtime = float(invdata['ts_last_success'])
+		dtime = datetime.datetime.fromtimestamp(unixtime)
+
+		return dtime
+
+
+	def getChannelMeasurements(self, invdata, channel=0, verbose=False):
+
+		if channel < 0 or channel > len(invdata['ch']):
 			return None
 
+		if verbose:
+			print("Channel %d '%s'" % (channel, invdata['ch_name'][channel]))
+			for chfld in range (len(invdata['ch'][channel])):
+				print('    ', self.field_names[channel][chfld], invdata['ch'][channel][chfld], self.field_units[channel][chfld])
+
+		m = dict(zip(self.field_names[channel], invdata['ch'][channel]))
+		return m
+
+
+	def getChannelMeasurement(self, invdata, measurement_name, channel=0, verbose=False):
+
 		try:
-			inv = j['inverter'][self.inverter]
+			i = self.field_names[channel].index(measurement_name)
+			return invdata['ch'][channel][i]
 		except:
-			print("Inverter list '%s' did not contain inverter nr %d" % (str(j['inverter']),self.inverter))
-			inv = None
-
-		return inv
+			return None
 
 
-	async def _getInverterJSONFields(self, url):
+	def getActiveLimit(self, invdata):
 
-		fielddata = {}
-
-		inv = await self._getInverterJSON(url)
-		if not inv:
-			return fielddata
-
-		for element in inv:
-			if 'val' in element:
-				fielddata[element['fld']] = float(element['val'])
-			else:
-				print('DTU REST API unexpected returned element %s' % (str(element)))
-
-		return fielddata
+		if 'power_limit_read' in invdata:
+			return float(invdata['power_limit_read'])
+		return 0
 
 
-	async def getInverterReadings(self):
+if __name__ == '__main__':
 
-		url = 'http://%s/api/record/live' % (self.hostname)
+	async def main():
+		dtu = AhoyDtuRESTAsync('192.168.0.52', inverter=1)
+		await dtu.queryLoop()
 
-		data = await self._getInverterJSONFields(url)
-
-		return data
-
-
-	async def getActiveLimits(self):
-
-		url = 'http://%s/api/record/config' % (self.hostname)
-
-		data = await self._getInverterJSONFields(url)
-
-		return data
-
+	asyncio.run(main())
