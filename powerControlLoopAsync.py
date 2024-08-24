@@ -223,10 +223,10 @@ async def controlLoop():
 		tmp1 = dtu.getChannelMeasurement(invdata, 'U_DC', dtu.DC_INPUT_1)
 		tmp2 = dtu.getChannelMeasurement(invdata, 'P_AC', dtu.AC_CHAN)
 		if tmp1 != None and tmp2 != None:
-			dtu_T = dtu.last_update
+			dtu_T = T # dtu.last_update
 			dtu_Vdc = float(tmp1)
 			dtu_Pac = float(tmp2)
-			print('DTU report time  : %s' % (str(dtu_T)))
+			print('DTU report time  : %s' % (str(dtu.last_update)))
 			print('Hoymiles DC in   : %.2f V_dc' % (dtu_Vdc))
 			print('Hoymiles AC pwr  : %.2f W_rms of max %d W' % (dtu_Pac, dynamic_max_power_W))
 		else:
