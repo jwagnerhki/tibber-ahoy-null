@@ -58,13 +58,12 @@ class AhoyDtuREST(threading.Thread):
 	def queryLoop(self):
 		"""
 		Inverter status polling loop - for debug purposes.
-		TODO: modify so fill data into a Queue object shared with potential consumer
 		"""
-
 		while True:
 			invdata = self.readInverterData()
 			plimit = self.getActiveLimit(invdata)
 			print('== Inverter %d - power limit %d Watt ==' % (self.inverter, plimit))
+			print('Updated     %s' % (str(self.last_update)))
 			print('YieldTotal  %s' % (self.getChannelMeasurement(invdata, 'YieldTotal', self.AC_CHAN)))
 			print('YieldDay    %s' % (self.getChannelMeasurement(invdata, 'YieldDay', self.AC_CHAN)))
 			for ch in range(len(invdata['ch'])):
@@ -109,7 +108,17 @@ class AhoyDtuREST(threading.Thread):
 		if not j:
 			return None
 
+		self.last_update = self.getDataTimestamp(j)
+
 		return j
+
+
+	def getDataTimestamp(self, invdata):
+
+		unixtime = float(invdata['ts_last_success'])
+		dtime = datetime.datetime.fromtimestamp(unixtime)
+
+		return dtime
 
 
 	def getChannelMeasurements(self, invdata, channel=0, verbose=False):
@@ -126,9 +135,9 @@ class AhoyDtuREST(threading.Thread):
 		return m
 
 
-	def getChannelMeasurement(self, invdata, name, channel=0, verbose=False):
+	def getChannelMeasurement(self, invdata, measurement_name, channel=0, verbose=False):
 		try:
-			i = self.field_names[channel].index(name)
+			i = self.field_names[channel].index(measurement_name)
 			return invdata['ch'][channel][i]
 		except:
 			return None
